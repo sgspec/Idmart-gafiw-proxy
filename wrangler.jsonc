@@ -1,9 +1,8 @@
 {
   "name": "idmart-gafiw-proxy",
   "main": "src/index.js",
-  "compatibility_date": "2026-08-16"
-}
-{
+  "compatibility_date": "2026-08-16",
+
   "observability": {
     "enabled": false,
     "head_sampling_rate": 1,
