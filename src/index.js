@@ -12,7 +12,7 @@ const UPSTREAM_HEADERS = {
   "Accept":
     "application/json, text/plain, */*",
   "User-Agent":
-    "Mozilla/5.0 (compatible; IDMart-GAFIW-Proxy/0.4.0)",
+    "Mozilla/5.0 (compatible; IDMart-GAFIW-Proxy/0.4.1)",
   "Referer":
     "https://gafiwshop.xyz/",
 };
@@ -41,7 +41,7 @@ export default {
         return json({
           ok: true,
           service: "IDMart GAFIWSHOP Proxy",
-          version: "0.4.0",
+          version: "0.4.1",
         });
       }
 
@@ -158,16 +158,22 @@ export default {
               headers: {
                 ...UPSTREAM_HEADERS,
                 "Content-Type":
-                  "application/x-www-form-urlencoded",
+                  "application/x-www-form-urlencoded; charset=UTF-8",
               },
               body: body.toString(),
             }
           );
 
-        return await normalizeUpstreamResponse(
-          response,
-          "MONEY"
-        );
+        /*
+         * MONEY:
+         * ส่งแบบเดียวกับตัวอย่าง GAFIWSHOP:
+         * POST + application/x-www-form-urlencoded
+         * และ keyapi อยู่ใน POST body
+         *
+         * จุดนี้แก้เฉพาะ MONEY จาก Worker เดิม
+         * Endpoint อื่นไม่เปลี่ยน
+         */
+        return await normalizeMoneyResponse(response);
       }
 
       /*
@@ -757,6 +763,76 @@ async function readRequestData(
   }
 
   return {};
+}
+
+
+/*
+ * ========================================================
+ * MONEY RESPONSE
+ *
+ * ไม่คืน HTTP 500/403 จาก upstream ตรง ๆ ให้ WordPress
+ * เพื่อให้ Admin เห็นรายละเอียดจริงของ GAFIWSHOP
+ * และไม่เกิด "ตอบกลับไม่ใช่ JSON"
+ *
+ * ถ้า upstream คืน JSON จะส่งข้อมูลเดิมกลับ
+ * พร้อม metadata ของ upstream
+ * ========================================================
+ */
+
+async function normalizeMoneyResponse(response) {
+  const status = response.status;
+  const contentType =
+    response.headers.get("content-type") || "";
+
+  const raw = await response.text();
+
+  let data = null;
+
+  try {
+    data = JSON.parse(raw);
+  } catch (_) {
+    data = null;
+  }
+
+  if (data !== null) {
+    return json(
+      {
+        ...data,
+        _proxy: {
+          endpoint: "MONEY",
+          upstream_status: status,
+          content_type: contentType,
+        },
+      },
+      200
+    );
+  }
+
+  let shortBody = String(raw || "")
+    .replace(/<script[\\s\\S]*?<\\/script>/gi, "")
+    .replace(/<style[\\s\\S]*?<\\/style>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\\s+/g, " ")
+    .trim();
+
+  if (shortBody.length > 1000) {
+    shortBody = shortBody.substring(0, 1000);
+  }
+
+  return json(
+    {
+      ok: false,
+      error: "GAFIWSHOP_MONEY_UPSTREAM_ERROR",
+      status: status,
+      endpoint: "MONEY",
+      message:
+        "GAFIWSHOP api_money ไม่ได้ตอบ JSON ตามปกติ",
+      upstream_content_type: contentType,
+      upstream_body: shortBody || null,
+      upstream_ok: response.ok,
+    },
+    200
+  );
 }
 
 
