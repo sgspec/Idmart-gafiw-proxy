@@ -2,9 +2,19 @@ const GAFIW_ORIGIN = "https://gafiwshop.xyz";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, X-GAFIW-API-KEY",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers":
+    "Content-Type, X-GAFIW-API-KEY",
   "Access-Control-Max-Age": "86400",
+};
+
+const UPSTREAM_HEADERS = {
+  "Accept":
+    "application/json, text/plain, */*",
+  "User-Agent":
+    "Mozilla/5.0 (compatible; IDMart-GAFIW-Proxy/0.4.0)",
+  "Referer":
+    "https://gafiwshop.xyz/",
 };
 
 export default {
@@ -20,27 +30,71 @@ export default {
 
     try {
       /*
-       * =====================================================
-       * สินค้า
+       * ==========================================
+       * HEALTH CHECK
+       * ==========================================
+       */
+      if (
+        request.method === "GET" &&
+        url.pathname === "/"
+      ) {
+        return json({
+          ok: true,
+          service: "IDMart GAFIWSHOP Proxy",
+          version: "0.4.0",
+        });
+      }
+
+      /*
+       * ==========================================
+       * ตรวจ Secret ของ Worker
+       * ==========================================
+       */
+      if (!env.GAFIW_API_KEY) {
+        return json(
+          {
+            ok: false,
+            error: "WORKER_API_KEY_NOT_CONFIGURED",
+          },
+          500
+        );
+      }
+
+      /*
+       * ==========================================
+       * PRODUCT
+       *
        * GET /api/gafiw-products
        *
-       * ใช้ api_product ของ GAFIWSHOP
-       * ไม่ต้องส่ง API Key จาก Browser
-       * =====================================================
+       * API ต้นทาง:
+       * GET /api/api_product
+       *
+       * ไม่ใช้ key ตามข้อมูล API
+       * ==========================================
        */
       if (
         request.method === "GET" &&
         url.pathname === "/api/gafiw-products"
       ) {
-        return await proxyGet(
-          `${GAFIW_ORIGIN}/api/api_product`
+        const response = await upstreamFetch(
+          `${GAFIW_ORIGIN}/api/api_product`,
+          {
+            method: "GET",
+            headers: UPSTREAM_HEADERS,
+          }
+        );
+
+        return await normalizeUpstreamResponse(
+          response,
+          "PRODUCT"
         );
       }
 
       /*
-       * =====================================================
-       * Endpoint ที่ต้องใช้ API KEY
-       * =====================================================
+       * ==========================================
+       * Endpoint สำคัญ
+       * ต้องมี Client Key จาก WordPress
+       * ==========================================
        */
       const protectedPaths = [
         "/api/gafiw-money",
@@ -49,24 +103,19 @@ export default {
         "/api/gafiw-claim",
         "/api/gafiw-check-claim",
         "/api/gafiw-netflix-otp",
-        "/api/gafiw-youku-otp",
         "/api/gafiw-disney-otp",
       ];
 
       if (protectedPaths.includes(url.pathname)) {
-        const clientKey = request.headers.get("X-GAFIW-API-KEY");
-
-        if (!env.GAFIW_API_KEY) {
-          return json(
-            {
-              ok: false,
-              error: "WORKER_API_KEY_NOT_CONFIGURED",
-            },
-            500
+        const clientKey =
+          request.headers.get(
+            "X-GAFIW-API-KEY"
           );
-        }
 
-        if (!clientKey || clientKey !== env.GAFIW_API_KEY) {
+        if (
+          !clientKey ||
+          clientKey !== env.GAFIW_API_KEY
+        ) {
           return json(
             {
               ok: false,
@@ -78,28 +127,52 @@ export default {
       }
 
       /*
-       * =====================================================
-       * เช็กยอดเงิน
+       * ==========================================
+       * MONEY
+       *
        * POST /api/gafiw-money
        *
        * GAFIWSHOP:
        * POST /api/api_money
-       * =====================================================
+       *
+       * keyapi = Worker Secret
+       * ==========================================
        */
       if (
-        url.pathname === "/api/gafiw-money" &&
-        request.method === "POST"
+        request.method === "POST" &&
+        url.pathname === "/api/gafiw-money"
       ) {
-        return await proxyFormPost(
-          `${GAFIW_ORIGIN}/api/api_money`,
-          request,
-          env.GAFIW_API_KEY
+        const body =
+          new URLSearchParams();
+
+        body.set(
+          "keyapi",
+          String(env.GAFIW_API_KEY).trim()
+        );
+
+        const response =
+          await upstreamFetch(
+            `${GAFIW_ORIGIN}/api/api_money`,
+            {
+              method: "POST",
+              headers: {
+                ...UPSTREAM_HEADERS,
+                "Content-Type":
+                  "application/x-www-form-urlencoded",
+              },
+              body: body.toString(),
+            }
+          );
+
+        return await normalizeUpstreamResponse(
+          response,
+          "MONEY"
         );
       }
 
       /*
-       * =====================================================
-       * สั่งซื้อ
+       * ==========================================
+       * BUY
        *
        * POST /api/gafiw-buy
        *
@@ -107,209 +180,466 @@ export default {
        * type_id
        * username_buy
        *
-       * แล้ว Worker เติม keyapi ให้เอง
-       * =====================================================
+       * Worker เติม keyapi เอง
+       * ==========================================
        */
       if (
-        url.pathname === "/api/gafiw-buy" &&
-        request.method === "POST"
+        request.method === "POST" &&
+        url.pathname === "/api/gafiw-buy"
       ) {
-        return await proxyFormPost(
-          `${GAFIW_ORIGIN}/api/api_buy`,
-          request,
-          env.GAFIW_API_KEY
+        const input =
+          await readRequestData(request);
+
+        const body =
+          new URLSearchParams();
+
+        const typeId =
+          String(
+            input.type_id || ""
+          ).trim();
+
+        const username =
+          String(
+            input.username_buy || ""
+          ).trim();
+
+        if (!typeId) {
+          return json(
+            {
+              ok: false,
+              error: "TYPE_ID_REQUIRED",
+            },
+            400
+          );
+        }
+
+        if (!username) {
+          return json(
+            {
+              ok: false,
+              error:
+                "USERNAME_BUY_REQUIRED",
+            },
+            400
+          );
+        }
+
+        body.set(
+          "type_id",
+          typeId
+        );
+
+        body.set(
+          "username_buy",
+          username
+        );
+
+        body.set(
+          "keyapi",
+          String(env.GAFIW_API_KEY).trim()
+        );
+
+        const response =
+          await upstreamFetch(
+            `${GAFIW_ORIGIN}/api/api_buy`,
+            {
+              method: "POST",
+              headers: {
+                ...UPSTREAM_HEADERS,
+                "Content-Type":
+                  "application/x-www-form-urlencoded",
+              },
+              body: body.toString(),
+            }
+          );
+
+        return await normalizeUpstreamResponse(
+          response,
+          "BUY"
         );
       }
 
       /*
-       * =====================================================
-       * ประวัติคำสั่งซื้อ
+       * ==========================================
+       * HISTORY
        *
        * GET /api/gafiw-history
-       *
-       * รองรับ:
-       * limit
-       * username_buy
-       * =====================================================
-       */
-      if (
-        url.pathname === "/api/gafiw-history" &&
-        request.method === "GET"
-      ) {
-        const target = new URL(
-          `${GAFIW_ORIGIN}/api/api_history`
-        );
-
-        copyQuery(url, target, [
-          "limit",
-          "username_buy",
-        ]);
-
-        target.searchParams.set(
-          "keyapi",
-          env.GAFIW_API_KEY
-        );
-
-        return await fetchExternal(target.toString(), {
-          method: "GET",
-        });
-      }
-
-      /*
-       * =====================================================
-       * ส่งเคลม
-       *
-       * POST /api/gafiw-claim
-       *
-       * รับ:
-       * order_id
-       * reason
-       * =====================================================
-       */
-      if (
-        url.pathname === "/api/gafiw-claim" &&
-        request.method === "POST"
-      ) {
-        return await proxyFormPost(
-          `${GAFIW_ORIGIN}/api/api_claim`,
-          request,
-          env.GAFIW_API_KEY
-        );
-      }
-
-      /*
-       * =====================================================
-       * ตรวจสอบสถานะเคลม
-       *
-       * POST /api/gafiw-check-claim
-       *
-       * รับ:
-       * order_id
-       * =====================================================
-       */
-      if (
-        url.pathname === "/api/gafiw-check-claim" &&
-        request.method === "POST"
-      ) {
-        return await proxyFormPost(
-          `${GAFIW_ORIGIN}/api/v1/check_claim_status.php`,
-          request,
-          env.GAFIW_API_KEY
-        );
-      }
-
-      /*
-       * =====================================================
-       * Netflix OTP
-       *
-       * POST /api/gafiw-netflix-otp
-       *
-       * รับ:
-       * order_id
-       * type
-       *
-       * type:
-       * 4code
-       * 6code
-       * household
-       * =====================================================
-       */
-      if (
-        url.pathname === "/api/gafiw-netflix-otp" &&
-        request.method === "POST"
-      ) {
-        return await proxyFormPost(
-          `${GAFIW_ORIGIN}/api/netflix_otp`,
-          request,
-          env.GAFIW_API_KEY,
-          "api_key"
-        );
-      }
-
-      /*
-       * =====================================================
-       * YouKu OTP
-       *
-       * GET /api/gafiw-youku-otp?email=...
-       *
-       * ไม่ต้องใช้ API Key ตาม API ต้นทาง
-       * แต่ Worker ยังตรวจ X-GAFIW-API-KEY
-       * เพื่อไม่ให้คนอื่นเอา Worker ไปใช้งานฟรี
-       * =====================================================
-       */
-      if (
-        url.pathname === "/api/gafiw-youku-otp" &&
-        request.method === "GET"
-      ) {
-        const email = url.searchParams.get("email") || "";
-
-        const target = new URL(
-          `${GAFIW_ORIGIN}/api/otp_youku`
-        );
-
-        target.searchParams.set("email", email);
-
-        return await fetchExternal(target.toString(), {
-          method: "GET",
-        });
-      }
-
-      /*
-       * =====================================================
-       * Disney+ OTP
-       *
-       * GET /api/gafiw-disney-otp?phone=...
-       *
-       * ส่ง:
-       * keyapi
-       * phone
-       * =====================================================
-       */
-      if (
-        url.pathname === "/api/gafiw-disney-otp" &&
-        request.method === "GET"
-      ) {
-        const phone = url.searchParams.get("phone") || "";
-
-        const target = new URL(
-          `${GAFIW_ORIGIN}/api/otp_disney`
-        );
-
-        target.searchParams.set(
-          "keyapi",
-          env.GAFIW_API_KEY
-        );
-
-        target.searchParams.set("phone", phone);
-
-        return await fetchExternal(target.toString(), {
-          method: "GET",
-        });
-      }
-
-      /*
-       * =====================================================
-       * Health Check
-       * =====================================================
+       * ==========================================
        */
       if (
         request.method === "GET" &&
-        url.pathname === "/"
+        url.pathname === "/api/gafiw-history"
       ) {
-        return json({
-          ok: true,
-          service: "IDMart GAFIWSHOP Proxy",
-          version: "0.3.0",
-        });
+        const target =
+          new URL(
+            `${GAFIW_ORIGIN}/api/api_history`
+          );
+
+        copyQuery(
+          url,
+          target,
+          [
+            "limit",
+            "offset",
+            "username_buy",
+          ]
+        );
+
+        target.searchParams.set(
+          "keyapi",
+          String(
+            env.GAFIW_API_KEY
+          ).trim()
+        );
+
+        const response =
+          await upstreamFetch(
+            target.toString(),
+            {
+              method: "GET",
+              headers: UPSTREAM_HEADERS,
+            }
+          );
+
+        return await normalizeUpstreamResponse(
+          response,
+          "HISTORY"
+        );
       }
 
+      /*
+       * ==========================================
+       * CLAIM
+       *
+       * POST /api/gafiw-claim
+       *
+       * ส่งข้อมูลจาก WordPress ต่อไป
+       * ==========================================
+       */
+      if (
+        request.method === "POST" &&
+        url.pathname === "/api/gafiw-claim"
+      ) {
+        const input =
+          await readRequestData(request);
+
+        const body =
+          new URLSearchParams();
+
+        for (
+          const [key, value]
+          of Object.entries(input)
+        ) {
+          if (
+            value !== undefined &&
+            value !== null &&
+            value !== ""
+          ) {
+            body.set(
+              key,
+              String(value)
+            );
+          }
+        }
+
+        body.delete("keyapi");
+
+        body.set(
+          "keyapi",
+          String(
+            env.GAFIW_API_KEY
+          ).trim()
+        );
+
+        const response =
+          await upstreamFetch(
+            `${GAFIW_ORIGIN}/api/api_claim`,
+            {
+              method: "POST",
+              headers: {
+                ...UPSTREAM_HEADERS,
+                "Content-Type":
+                  "application/x-www-form-urlencoded",
+              },
+              body: body.toString(),
+            }
+          );
+
+        return await normalizeUpstreamResponse(
+          response,
+          "CLAIM"
+        );
+      }
+
+      /*
+       * ==========================================
+       * CHECK CLAIM STATUS
+       * ==========================================
+       */
+      if (
+        request.method === "POST" &&
+        url.pathname ===
+          "/api/gafiw-check-claim"
+      ) {
+        const input =
+          await readRequestData(request);
+
+        const body =
+          new URLSearchParams();
+
+        for (
+          const [key, value]
+          of Object.entries(input)
+        ) {
+          if (
+            value !== undefined &&
+            value !== null &&
+            value !== ""
+          ) {
+            body.set(
+              key,
+              String(value)
+            );
+          }
+        }
+
+        body.delete("keyapi");
+
+        body.set(
+          "keyapi",
+          String(
+            env.GAFIW_API_KEY
+          ).trim()
+        );
+
+        const response =
+          await upstreamFetch(
+            `${GAFIW_ORIGIN}/api/v1/check_claim_status.php`,
+            {
+              method: "POST",
+              headers: {
+                ...UPSTREAM_HEADERS,
+                "Content-Type":
+                  "application/x-www-form-urlencoded",
+              },
+              body: body.toString(),
+            }
+          );
+
+        return await normalizeUpstreamResponse(
+          response,
+          "CHECK_CLAIM"
+        );
+      }
+
+      /*
+       * ==========================================
+       * NETFLIX OTP
+       *
+       * API จริงใช้ api_key
+       * ไม่ใช่ keyapi
+       * ==========================================
+       */
+      if (
+        request.method === "POST" &&
+        url.pathname ===
+          "/api/gafiw-netflix-otp"
+      ) {
+        const input =
+          await readRequestData(request);
+
+        const body =
+          new URLSearchParams();
+
+        const orderId =
+          String(
+            input.order_id || ""
+          ).trim();
+
+        const type =
+          String(
+            input.type || ""
+          ).trim();
+
+        if (!orderId) {
+          return json(
+            {
+              ok: false,
+              error:
+                "ORDER_ID_REQUIRED",
+            },
+            400
+          );
+        }
+
+        body.set(
+          "api_key",
+          String(
+            env.GAFIW_API_KEY
+          ).trim()
+        );
+
+        body.set(
+          "order_id",
+          orderId
+        );
+
+        if (type) {
+          body.set(
+            "type",
+            type
+          );
+        }
+
+        const response =
+          await upstreamFetch(
+            `${GAFIW_ORIGIN}/api/netflix_otp`,
+            {
+              method: "POST",
+              headers: {
+                ...UPSTREAM_HEADERS,
+                "Content-Type":
+                  "application/x-www-form-urlencoded",
+              },
+              body: body.toString(),
+            }
+          );
+
+        return await normalizeUpstreamResponse(
+          response,
+          "NETFLIX_OTP"
+        );
+      }
+
+      /*
+       * ==========================================
+       * YOUKU OTP
+       *
+       * GET /api/gafiw-youku-otp?email=
+       * ไม่ใช้ API Key ตามเอกสาร
+       * ==========================================
+       */
+      if (
+        request.method === "GET" &&
+        url.pathname ===
+          "/api/gafiw-youku-otp"
+      ) {
+        const email =
+          String(
+            url.searchParams.get(
+              "email"
+            ) || ""
+          ).trim();
+
+        if (!email) {
+          return json(
+            {
+              ok: false,
+              error: "EMAIL_REQUIRED",
+            },
+            400
+          );
+        }
+
+        const target =
+          new URL(
+            `${GAFIW_ORIGIN}/api/otp_youku`
+          );
+
+        target.searchParams.set(
+          "email",
+          email
+        );
+
+        const response =
+          await upstreamFetch(
+            target.toString(),
+            {
+              method: "GET",
+              headers: UPSTREAM_HEADERS,
+            }
+          );
+
+        return await normalizeUpstreamResponse(
+          response,
+          "YOUKU_OTP"
+        );
+      }
+
+      /*
+       * ==========================================
+       * DISNEY OTP
+       * ==========================================
+       */
+      if (
+        request.method === "GET" &&
+        url.pathname ===
+          "/api/gafiw-disney-otp"
+      ) {
+        const phone =
+          String(
+            url.searchParams.get(
+              "phone"
+            ) || ""
+          ).trim();
+
+        if (!phone) {
+          return json(
+            {
+              ok: false,
+              error:
+                "PHONE_REQUIRED",
+            },
+            400
+          );
+        }
+
+        const target =
+          new URL(
+            `${GAFIW_ORIGIN}/api/otp_disney`
+          );
+
+        target.searchParams.set(
+          "keyapi",
+          String(
+            env.GAFIW_API_KEY
+          ).trim()
+        );
+
+        target.searchParams.set(
+          "phone",
+          phone
+        );
+
+        const response =
+          await upstreamFetch(
+            target.toString(),
+            {
+              method: "GET",
+              headers: UPSTREAM_HEADERS,
+            }
+          );
+
+        return await normalizeUpstreamResponse(
+          response,
+          "DISNEY_OTP"
+        );
+      }
+
+      /*
+       * ==========================================
+       * NOT FOUND
+       * ==========================================
+       */
       return json(
         {
           ok: false,
           error: "NOT_FOUND",
+          path: url.pathname,
         },
         404
       );
+
     } catch (error) {
       return json(
         {
@@ -327,155 +657,259 @@ export default {
 };
 
 
-/* =========================================================
- * GET Proxy
- * ========================================================= */
+/*
+ * ========================================================
+ * FETCH GAFIWSHOP
+ * ========================================================
+ */
 
-async function proxyGet(targetUrl) {
-  return fetchExternal(targetUrl, {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-    },
-  });
-}
-
-
-/* =========================================================
- * POST Form Proxy
- *
- * Worker รับข้อมูลจาก WordPress
- * แล้วเติม API Key ก่อนส่งให้ GAFIWSHOP
- * ========================================================= */
-
-async function proxyFormPost(
-  targetUrl,
-  request,
-  apiKey,
-  keyName = "keyapi"
-) {
-  let input = {};
-
-  const contentType =
-    request.headers.get("content-type") || "";
-
-  if (
-    contentType.includes(
-      "application/json"
-    )
-  ) {
-    input = await request.json();
-  } else {
-    const form = await request.formData();
-
-    for (const [key, value] of form.entries()) {
-      if (typeof value === "string") {
-        input[key] = value;
-      }
-    }
-  }
-
-  const body = new URLSearchParams();
-
-  for (const [key, value] of Object.entries(input)) {
-    if (
-      value !== undefined &&
-      value !== null &&
-      value !== ""
-    ) {
-      body.set(key, String(value));
-    }
-  }
-
-  /*
-   * สำคัญ:
-   * ลบ keyapi/api_key ที่ Client อาจส่งมา
-   * แล้วใช้ Secret ของ Worker แทน
-   */
-  body.delete("keyapi");
-  body.delete("api_key");
-
-  body.set(keyName, apiKey);
-
-  return fetchExternal(targetUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type":
-        "application/x-www-form-urlencoded",
-      Accept: "application/json",
-    },
-    body,
-  });
-}
-
-
-/* =========================================================
- * External Request
- * ========================================================= */
-
-async function fetchExternal(
-  targetUrl,
+async function upstreamFetch(
+  target,
   options = {}
 ) {
-  const controller = new AbortController();
+  const controller =
+    new AbortController();
 
-  const timeout = setTimeout(() => {
-    controller.abort();
-  }, 30000);
+  const timeout =
+    setTimeout(() => {
+      controller.abort();
+    }, 30000);
 
   try {
-    const response = await fetch(targetUrl, {
-      ...options,
-      redirect: "follow",
-      signal: controller.signal,
-    });
+    return await fetch(
+      target,
+      {
+        ...options,
+        redirect: "follow",
+        signal: controller.signal,
 
-    const contentType =
-      response.headers.get("content-type") ||
-      "application/json";
-
-    const body = await response.arrayBuffer();
-
-    const headers = new Headers();
-
-    headers.set(
-      "Content-Type",
-      contentType
+        /*
+         * ป้องกัน Cloudflare Worker
+         * เอา Response เก่าจาก Cache มาใช้
+         */
+        cf: {
+          cacheTtl: 0,
+          cacheEverything: false,
+        },
+      }
     );
-
-    headers.set(
-      "Cache-Control",
-      "no-store, no-cache, must-revalidate"
-    );
-
-    for (const [key, value] of Object.entries(
-      CORS_HEADERS
-    )) {
-      headers.set(key, value);
-    }
-
-    return new Response(body, {
-      status: response.status,
-      headers,
-    });
   } finally {
     clearTimeout(timeout);
   }
 }
 
 
-/* =========================================================
+/*
+ * ========================================================
+ * อ่าน Request
+ * ========================================================
+ */
+
+async function readRequestData(
+  request
+) {
+  const contentType =
+    request.headers.get(
+      "content-type"
+    ) || "";
+
+  if (
+    contentType.includes(
+      "application/json"
+    )
+  ) {
+    const data =
+      await request.json();
+
+    return data &&
+      typeof data === "object"
+      ? data
+      : {};
+  }
+
+  if (
+    contentType.includes(
+      "application/x-www-form-urlencoded"
+    ) ||
+    contentType.includes(
+      "multipart/form-data"
+    )
+  ) {
+    const form =
+      await request.formData();
+
+    const data = {};
+
+    for (
+      const [
+        key,
+        value
+      ] of form.entries()
+    ) {
+      if (
+        typeof value === "string"
+      ) {
+        data[key] = value;
+      }
+    }
+
+    return data;
+  }
+
+  return {};
+}
+
+
+/*
+ * ========================================================
+ * Response Normalizer
+ *
+ * จุดสำคัญ:
+ * ถ้า GAFIWSHOP ตอบ JSON -> ส่ง JSON
+ *
+ * ถ้าตอบ HTML เช่น Cloudflare 403
+ * -> แปลงเป็น JSON เพื่อให้ WordPress
+ * ไม่เจอ "ตอบกลับไม่ใช่ JSON"
+ * ========================================================
+ */
+
+async function normalizeUpstreamResponse(
+  response,
+  endpoint
+) {
+  const status =
+    response.status;
+
+  const contentType =
+    response.headers.get(
+      "content-type"
+    ) || "";
+
+  const raw =
+    await response.text();
+
+  /*
+   * ลอง JSON ก่อน
+   */
+  let data = null;
+
+  try {
+    data =
+      JSON.parse(raw);
+  } catch (_) {
+    data = null;
+  }
+
+  /*
+   * JSON จาก GAFIWSHOP
+   */
+  if (data !== null) {
+    return json(
+      {
+        ...data,
+
+        /*
+         * metadata สำหรับ Admin
+         * ไม่ทำลายข้อมูลเดิม
+         */
+        _proxy: {
+          endpoint,
+          upstream_status: status,
+          content_type: contentType,
+        },
+      },
+      status
+    );
+  }
+
+  /*
+   * HTML / Cloudflare / Text
+   */
+  let shortBody =
+    String(raw || "")
+      .replace(
+        /<script[\s\S]*?<\/script>/gi,
+        ""
+      )
+      .replace(
+        /<style[\s\S]*?<\/style>/gi,
+        ""
+      )
+      .replace(
+        /<[^>]+>/g,
+        " "
+      )
+      .replace(
+        /\s+/g,
+        " "
+      )
+      .trim();
+
+  if (
+    shortBody.length > 500
+  ) {
+    shortBody =
+      shortBody.substring(
+        0,
+        500
+      );
+  }
+
+  return json(
+    {
+      ok: false,
+
+      error:
+        status === 403
+          ? "GAFIWSHOP_HTTP_403"
+          : "GAFIWSHOP_HTTP_ERROR",
+
+      status,
+
+      endpoint,
+
+      message:
+        status === 403
+          ? "GAFIWSHOP ปฏิเสธคำขอจาก Worker"
+          : "GAFIWSHOP ตอบกลับไม่ใช่ JSON",
+
+      upstream_content_type:
+        contentType,
+
+      upstream_body:
+        shortBody || null,
+
+      /*
+       * สำคัญสำหรับ Admin:
+       * จะเห็นว่า 403 เกิดที่ upstream
+       * ไม่ใช่ Worker ของเรา
+       */
+      upstream_ok:
+        response.ok,
+    },
+    status
+  );
+}
+
+
+/*
+ * ========================================================
  * Query Helper
- * ========================================================= */
+ * ========================================================
+ */
 
 function copyQuery(
   source,
   target,
   names
 ) {
-  for (const name of names) {
+  for (
+    const name of names
+  ) {
     const value =
-      source.searchParams.get(name);
+      source.searchParams.get(
+        name
+      );
 
     if (
       value !== null &&
@@ -490,22 +924,41 @@ function copyQuery(
 }
 
 
-/* =========================================================
+/*
+ * ========================================================
  * JSON Response
- * ========================================================= */
+ * ========================================================
+ */
 
-function json(data, status = 200) {
-  const headers = new Headers({
-    "Content-Type":
-      "application/json; charset=utf-8",
-    "Cache-Control":
-      "no-store, no-cache, must-revalidate",
-  });
+function json(
+  data,
+  status = 200
+) {
+  const headers =
+    new Headers();
 
-  for (const [key, value] of Object.entries(
-    CORS_HEADERS
-  )) {
-    headers.set(key, value);
+  headers.set(
+    "Content-Type",
+    "application/json; charset=utf-8"
+  );
+
+  headers.set(
+    "Cache-Control",
+    "no-store, no-cache, must-revalidate, max-age=0"
+  );
+
+  for (
+    const [
+      key,
+      value
+    ] of Object.entries(
+      CORS_HEADERS
+    )
+  ) {
+    headers.set(
+      key,
+      value
+    );
   }
 
   return new Response(
