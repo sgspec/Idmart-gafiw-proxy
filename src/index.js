@@ -4,56 +4,67 @@ addEventListener('fetch', event => {
 
 async function handleRequest(request) {
   const url = new URL(request.url)
-  
-  // กำหนด URL ปลายทางของ Gafiwshop (เปลี่ยนลิงก์นี้ถ้าโดนเปลี่ยนโดเมน)
   const targetBase = 'https://gafiwshop.xyz'
 
-  // ถ้าเข้าหน้าแรกสุดของ Worker ให้แสดงสถานะ Health check แบบ JSON กลับไป
   if (url.pathname === '/' || url.pathname === '') {
     return new Response(JSON.stringify({
       ok: true,
-      service: 'GAFIWSHOP Worker Proxy',
-      version: '2.0.0',
-      message: 'Worker is running successfully'
+      service: 'GAFIWSHOP Worker Proxy Pro',
+      version: '2.1.0',
+      message: 'Worker is running smoothly'
     }), {
       headers: { 'Content-Type': 'application/json; charset=utf-8' }
     })
   }
 
-  // ประกอบร่าง URL ปลายทางที่ต้องการดึงข้อมูล
   const targetUrl = targetBase + url.pathname + url.search
-
-  // ดึง API Key จาก Header ที่ส่งมาจาก WordPress (ถ้ามี)
   const clientApiKey = request.headers.get('X-GAFIW-API-KEY') || ''
 
-  // สร้าง Header ปลอมตัวเป็น Browser จริง ๆ เพื่อหลบเลี่ยงการบล็อก Bot
+  // ชุด Header จำลอง Browser ระดับสูง
   const customHeaders = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': 'application/json, text/plain, */*',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'Accept-Language': 'th-TH,th;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
     'Referer': 'https://gafiwshop.xyz/',
     'Origin': 'https://gafiwshop.xyz',
-    'Cache-Control': 'no-cache'
+    'Sec-Ch-Ua': '"Google Chrome";v="123", "Not:A-Brand";v="8", "Chromium";v="123"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'same-origin',
+    'Upgrade-Insecure-Requests': '1',
+    'Connection': 'keep-alive'
   }
 
-  // ถ้ามีการส่ง API Key มาจากฝั่งเรา ให้แนบส่งต่อไปยังเว็บปลายทางด้วย
   if (clientApiKey) {
     customHeaders['Authorization'] = 'Bearer ' + clientApiKey
     customHeaders['X-API-Key'] = clientApiKey
   }
 
   try {
-    // ส่ง Request ไปยังเว็บปลายทาง
     const apiResponse = await fetch(targetUrl, {
       method: request.method,
       headers: customHeaders,
-      body: ['GET', 'HEAD'].includes(request.method) ? null : await request.text(),
       redirect: 'follow'
     })
 
     const responseBody = await apiResponse.text()
 
-    // ส่งข้อมูลกลับไปหา WordPress (พร้อมรักษา Status Code เดิม)
+    // ตรวจสอบว่ายังติดหน้า Cloudflare Challenge อยู่หรือไม่
+    if (responseBody.includes('Just a moment') || responseBody.includes('cf-browser-verification')) {
+      return new Response(JSON.stringify({
+        status: 'error',
+        message: 'GAFIWSHOP ป้องกันบอทแน่นหนาเกินไป (Cloudflare Challenge Blocked)',
+        _http_code: 403,
+        _raw: 'Just a moment... Bot protection triggered.'
+      }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' }
+      })
+    }
+
     return new Response(responseBody, {
       status: apiResponse.status,
       headers: {
@@ -69,7 +80,7 @@ async function handleRequest(request) {
       _http_code: 500
     }), {
       status: 500,
-      headers: { 'Content-Type': 'application/json; charset=utf-8' }
+      headers: { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' }
     })
   }
 }
